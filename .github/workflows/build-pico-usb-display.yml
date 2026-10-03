@@ -1,0 +1,188 @@
+name: Build HJOS Waveshare Pico USB Display
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build-pico2-waveshare:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            build-essential \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib
+
+      - name: Clone upstream Pico-USB-Display
+        run: |
+          git clone --recurse-submodules https://github.com/embeddedboys/Pico-USB-Display.git pud
+          cd pud
+          git submodule update --init --recursive
+
+      - name: Clone Raspberry Pi Pico SDK
+        run: |
+          git clone --depth 1 --branch develop https://github.com/raspberrypi/pico-sdk.git pico-sdk
+          cd pico-sdk
+          git submodule update --init --recursive
+
+      - name: Add Waveshare Pico-LCD-2 panel support
+        working-directory: pud
+        run: |
+          cat > lib/pico-display-lib/configs/waveshare-pico-lcd-2.cmake <<'EOF'
+          # Waveshare Pico-LCD-2 (2 inch, 320x240, ST7789V)
+          # Plug-on Pico shield: no jumper-wire remapping required.
+
+          set(OVERCLOCK_ENABLED 1)
+          if(${PICO_BOARD} STREQUAL "pico2" OR ${PICO_PLATFORM} STREQUAL "rp2350")
+              # Stable RP2350 profile from pico-display-lib.
+              set(OVERCLOCK_PROFILE 1)
+          else()
+              set(OVERCLOCK_PROFILE 1)
+          endif()
+
+          set(TFT_BUS_TYPE 0)
+          set(TFT_SPIX 1)
+
+          # Waveshare Pico-LCD-2 plug-on mapping
+          set(TFT_PIN_SCL 10)   # LCD CLK
+          set(TFT_PIN_SDA 11)   # LCD DIN/MOSI
+          set(TFT_PIN_RES 12)   # LCD RST
+          set(TFT_PIN_DC  8)    # LCD DC
+          set(TFT_PIN_CS  9)    # LCD CS
+          set(TFT_PIN_BLK 13)   # LCD BL
+
+          set(TFT_BLK_ACTIVE_HIGH 1)
+
+          set(TFT_HOR_RES 320)
+          set(TFT_VER_RES 240)
+          set(TFT_ROTATION 0)
+
+          # USB/display buffers are little-endian RGB565 on the Pico side and
+          # the panel expects the high byte first on the SPI data line.
+          set(TFT_COLOR_16_SWAP 1)
+
+          # 62.5 MHz is comfortably below the panel's demonstrated 100 MHz use
+          # and leaves a useful timing margin.
+          set(TFT_BUS_CLK_KHZ 62500)
+          set(DISP_OVER_PIO 1)
+          set(PIO_USE_DMA 1)
+
+          set(TFT_DRV_USE_ST7789V 1)
+          set(TFT_MODEL_WAVESHARE_PICO_LCD_2 1)
+
+          set(INDEV_BUS_TYPE 0)
+          set(INDEV_DRV_NOT_USED 1)
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("lib/pico-display-lib/drivers/display/CMakeLists.txt")
+          s = p.read_text()
+          old = '''    panel_require_one_of("ST7789V initialization variant"
+          TFT_MODEL_P169H002
+          TFT_MODEL_YT280S030)
+          if(TFT_MODEL_P169H002)
+              target_compile_definitions(${LIBRARY_NAME} PRIVATE TFT_ST7789V_VARIANT_P169H002=1)
+          else()
+              target_compile_definitions(${LIBRARY_NAME} PRIVATE TFT_ST7789V_VARIANT_YT280S030=1)
+          endif()
+          '''
+          new = '''    panel_require_one_of("ST7789V initialization variant"
+          TFT_MODEL_P169H002
+          TFT_MODEL_YT280S030
+          TFT_MODEL_WAVESHARE_PICO_LCD_2)
+          if(TFT_MODEL_P169H002)
+              target_compile_definitions(${LIBRARY_NAME} PRIVATE TFT_ST7789V_VARIANT_P169H002=1)
+          elseif(TFT_MODEL_WAVESHARE_PICO_LCD_2)
+              target_compile_definitions(${LIBRARY_NAME} PRIVATE TFT_ST7789V_VARIANT_WAVESHARE_PICO_LCD_2=1)
+          else()
+              target_compile_definitions(${LIBRARY_NAME} PRIVATE TFT_ST7789V_VARIANT_YT280S030=1)
+          endif()
+          '''
+          if old not in s:
+              raise SystemExit("Could not find ST7789V variant block")
+          p.write_text(s.replace(old, new))
+
+          p = Path("lib/pico-display-lib/drivers/display/tft_st7789v.c")
+          s = p.read_text()
+          marker = '''#if TFT_ST7789V_VARIANT_P169H002
+          '''
+          insert = '''#if TFT_ST7789V_VARIANT_WAVESHARE_PICO_LCD_2
+              write_reg(priv, 0x36, 0x70);
+              write_reg(priv, 0x3A, 0x05);
+
+              write_reg(priv, 0xB2, 0x0C, 0x0C, 0x00, 0x33, 0x33);
+              write_reg(priv, 0xB7, 0x35);
+              write_reg(priv, 0xBB, 0x19);
+              write_reg(priv, 0xC0, 0x2C);
+              write_reg(priv, 0xC2, 0x01);
+              write_reg(priv, 0xC3, 0x12);
+              write_reg(priv, 0xC4, 0x20);
+              write_reg(priv, 0xC6, 0x0F);
+              write_reg(priv, 0xD0, 0xA4, 0xA1);
+
+              write_reg(priv, 0xE0,
+                  0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F,
+                  0x54, 0x4C, 0x18, 0x0D, 0x0B, 0x1F, 0x23);
+
+              write_reg(priv, 0xE1,
+                  0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F,
+                  0x44, 0x51, 0x2F, 0x1F, 0x1F, 0x20, 0x23);
+
+              write_reg(priv, 0x21);
+              write_reg(priv, 0x11);
+              mdelay(120);
+              write_reg(priv, 0x29);
+          #elif TFT_ST7789V_VARIANT_P169H002
+          '''
+          if marker not in s:
+              raise SystemExit("Could not find ST7789V driver marker")
+          p.write_text(s.replace(marker, insert))
+          PY
+
+      - name: Configure Pico 2 / RP2350
+        working-directory: pud
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+        run: |
+          cmake -S . -B build-pico2 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_BOARD=pico2 \
+            -DPUD_CONFIG=waveshare-pico-lcd-2
+
+      - name: Build Pico USB Display UF2
+        working-directory: pud
+        run: |
+          cmake --build build-pico2 --parallel $(nproc)
+          test -s build-pico2/pico-usb-display.uf2
+          sha256sum build-pico2/pico-usb-display.uf2
+          ls -lh build-pico2/pico-usb-display.uf2
+
+      - name: Package UF2
+        working-directory: pud
+        run: |
+          mkdir -p artifact
+          cp build-pico2/pico-usb-display.uf2 artifact/HJOS_Pico2W_Waveshare_PicoLCD2_PicoUSBDisplay.uf2
+          cp 60-pico-usb-display.rules artifact/
+          sha256sum artifact/HJOS_Pico2W_Waveshare_PicoLCD2_PicoUSBDisplay.uf2 > artifact/SHA256SUMS.txt
+
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HJOS-Pico2W-Waveshare-PicoLCD2-UF2
+          path: pud/artifact/
+          if-no-files-found: error
+          retention-days: 30
